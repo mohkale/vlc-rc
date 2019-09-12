@@ -120,10 +120,6 @@ WARN vlc will glitch out if you add the same file that currently
      quickly. That cannot be good for buffering"
   :group 'vlc)
 
-
-
-
-
 ;  ____
 ; |  _ \ _ __ ___   ___ ___  ___ ___
 ; | |_) | '__/ _ \ / __/ _ \/ __/ __|
@@ -168,7 +164,7 @@ connection, one will be made for you regardless."
            (set-process-query-on-exit-flag process nil)))))
 
 (defun vlc/create-new-vlc-client (&optional dont-open-server-on-no-socket)
-  (vlc/kill-process nil t) ; kill existing client socket
+  (vlc/kill-connection t) ; kill existing client socket
   ;; WARN prefix should be nil or you'll encounter infinite recursion
   ;;      due to interactive prefix functionality.
 
@@ -180,14 +176,10 @@ connection, one will be made for you regardless."
             (error
              (when (not dont-open-server-on-no-socket)
                ;; if caller allows the creation of a new vlc instance
-               (message (format "no vlc instance at %s:%d found" vlc-server-host vlc-server-port))
+               (message "no vlc instance at %s:%d found" vlc-server-host vlc-server-port)
                (vlc/create-new-vlc-server)
                (apply 'open-network-stream p-args))))))
   (and vlc-process (set-process-query-on-exit-flag vlc-process nil)))
-
-
-
-
 
 ;  ____  _                 _           _        _   _
 ; / ___|(_)_ __ ___  _ __ | | ___     / \   ___| |_(_) ___  _ __  ___
@@ -259,27 +251,31 @@ the server already exists."
     (call-interactively 'vlc/kill-process))
   (vlc-process))
 
-(defun vlc/kill-process (&optional prefix silent)
-  "kills the local connection to the vlc server
-pass a prefix arg if you also want to kill the server
-alongside the connection to it.
+(defun vlc/kill-process (&optional silent)
+  "kill both the vlc server and the local connection to it.
+if the local connection doesn't exist, but the server does, a new
+connection will be made to it and then both the connection and the
+server will be killed."
+  (interactive)
+  (when (or vlc-process (not (vlc/create-new-vlc-client t)))
+    (vlc/send-message "quit")
+    (setq vlc-process nil)
 
-If the connection is dead and a prefix arg is given
-a new connection will be made and then both the window
-and the connection will be killed."
-  (interactive "P")
-  (if (and prefix (or vlc-process (not (vlc/create-new-vlc-client t))))
-      ;; with prefix, if an open vlc server does exist, kill it
-      ;; and in doing so also kill the socket connection to it.
-      (vlc/send-message "quit")
-    (when (vlc/alive-p)
-      (vlc/send-message "logout")))
+    (unless silent
+      (message "terminated vlc connection & server"))))
 
-  (setq vlc-process nil)
-  (unless silent (message (concat "terminated vlc connection"
-                                  (if prefix " & vlc server")))))
+(defun vlc/kill-connection (&optional silent)
+  "kills the local connection to the vlc server"
+  (interactive)
+  (when (vlc/alive-p)
+    (vlc/send-message "logout")
+    (setq vlc-process nil)
 
-(defmacro vlc/defun-send-message-command (command-name message &optional docstring &key let-prefix-multiply-message-count)
+    (unless silent
+      (message "terminated vlc connection"))))
+
+(defmacro vlc/defun-send-message-command
+    (command-name message &optional docstring &key let-prefix-multiply-message-count)
   "macro to define commands which send a message to the vlc server
 the command-name should be the part of the command following
 `vlc/' and the message should be a string which can be sent
@@ -419,11 +415,13 @@ allow-empty
     `(progn
       (defun ,get-list-name ()
         ,get-list-docstring
-        (vlc/send-message ,message #'(lambda ()
-                                        (let (aggregate '())
-                                          (while (search-forward-regexp ,match-regex nil t)
-                                            (setq aggregate (append aggregate `((,(match-string 1) . ,(match-string 2))))))
-                                          aggregate))))
+        (vlc/send-message ,message
+                          #'(lambda ()
+                              (let (aggregate '())
+                                (while (search-forward-regexp ,match-regex nil t)
+                                  (setq aggregate
+                                        (append aggregate `((,(match-string 1) . ,(match-string 2))))))
+                                aggregate))))
 
       (defun ,set-value-name ()
         ,set-value-docstring
@@ -486,20 +484,17 @@ allow-empty
 
 (defmacro vlc/defun-parse-single-value-from-command (command-name message regexp &optional converter)
   `(defun ,(intern (concat "vlc/get-" (symbol-name command-name))) ()
-     (vlc/send-message ,message #'(lambda ()
-                                    (when (search-forward-regexp ,regexp nil t)
-                                      (let ((value (buffer-substring (line-beginning-position)
-                                                                     (line-end-position))))
-                                        (and ,converter
-                                             (setq value (funcall ,converter value)))
-                                        value))))))
+     (vlc/send-message ,message
+                       #'(lambda ()
+                           (when (search-forward-regexp ,regexp nil t)
+                             (let ((value (buffer-substring (line-beginning-position)
+                                                            (line-end-position))))
+                               (and ,converter
+                                    (setq value (funcall ,converter value)))
+                               value))))))
 
 (vlc/defun-parse-single-value-from-command stream-time "get_time" "^[[:digit:]]+$" #'cl-parse-integer)
 (vlc/defun-parse-single-value-from-command stream-length "get_length" "^[[:digit:]]+$" #'cl-parse-integer)
-
-
-
-
 
 ;   ____                      _                _        _   _
 ;  / ___|___  _ __ ___  _ __ | | _____  __    / \   ___| |_(_) ___  _ __  ___
@@ -526,7 +521,7 @@ an exact volume value."
   (if (consp prefix)
       (let ((volume-value (read-number "volume-value: " 0)))
         (and (< volume-value 0)
-             (error (format "cannot set vlc volume to negative value: %03d" volume-value)))
+             (error "cannot set vlc volume to negative value: %03d" volume-value))
         (vlc/send-message (format "volume %d" volume-value) t))
     (unless prefix
       (setq prefix (read-number "volume-prefix: " 1)))
@@ -535,18 +530,21 @@ an exact volume value."
 
 (defun vlc/playlist ()
   "get a list of all the media items in VLCs main playlist"
-    (vlc/send-message "playlist" '(lambda ()
-                                    (save-excursion
-                                      (save-restriction
-                                        (let ((playlist-items '()))
-                                          (let ((start (point)))
-                                            (search-forward-regexp "^|- Media Library$")
-                                            (narrow-to-region start (- (line-beginning-position) 1))
-                                            (goto-char start)
-                                            ;; TODO fix regexp only works for videos that're minutes long (not hours)
-                                            (while (search-forward-regexp "^|  - \\(.+\\)\\(?: \\(([[:digit:]]+:[[:digit:]]+)\\)\\)?$" nil t)
-                                              (setq playlist-items (append playlist-items `((,(match-string 1) . ,(match-string 2)))))))
-                                          playlist-items))))))
+  (vlc/send-message "playlist"
+                    '(lambda ()
+                       (save-excursion
+                         (save-restriction
+                           (let ((playlist-items '()))
+                             (let ((start (point)))
+                               (search-forward-regexp "^|- Media Library$")
+                               (narrow-to-region start (- (line-beginning-position) 1))
+                               (goto-char start)
+                               ;; TODO fix regexp only works for videos that're minutes long (not hours)
+                               (while (search-forward-regexp
+                                       "^|  - \\(.+\\)\\(?: \\(([[:digit:]]+:[[:digit:]]+)\\)\\)?$"
+                                       nil t)
+                                 (setq playlist-items (append playlist-items `((,(match-string 1) . ,(match-string 2)))))))
+                             playlist-items))))))
 
 (defun vlc/goto-playlist-item ()
   "prompt and then goto an item in your current playlist"
@@ -595,10 +593,6 @@ stream) or one of the diplayed autocomplete suggestions."
                 stream-time stream-length prefix))
     (vlc/send-message (concat "seek " (number-to-string prefix)) t)))
 
-
-
-
-
 ;  __  __ _
 ; |  \/  (_)___  ___
 ; | |\/| | / __|/ __|
@@ -610,9 +604,8 @@ stream) or one of the diplayed autocomplete suggestions."
   "prompts user for a vlc command and then executes it interactively "
   (interactive)
   (let* ((command-list '("start"
-                         "kill"
+                         "logout"
                          "quit"
-                         "exit"
                          "pause"
                          "play"
                          "toggle-play"
@@ -620,14 +613,16 @@ stream) or one of the diplayed autocomplete suggestions."
                          "clear-playlist"))
          (choice (completing-read "command: " command-list nil t)))
     (setq invoked-process (pcase choice
+                            ;; TODO associate once, choose later
                             ("start"          'vlc/start-process)
-                            ("kill"           'vlc/kill-process)
+                            ("logout"         'vlc/kill-connection)
+                            ("quit"           'vlc/kill-process)
                             ("pause"          'vlc/pause)
                             ("play"           'vlc/play)
                             ("toggle-play"    'vlc/toggle-play)
                             ("enqueue"        'vlc/enqueu-file)
                             ("clear-playlist" 'vlc/clear-playlist)
-                            (_ (error (format "unknown vlc command: %s" choice)))))
+                            (_ (error "unknown vlc command: %s" choice))))
     (call-interactively invoked-process)))
 
 (defun vlc/alive-p ()
@@ -637,11 +632,6 @@ stream) or one of the diplayed autocomplete suggestions."
 (defun vlc/show-vlc-buffer ()
   (interactive)
   (display-buffer (get-buffer vlc-client-buffer-name) 'display-buffer-pop-up-window))
-
-
-
-
-
 
 ;  _____      _                        _
 ; | ____|_  _| |_ ___ _ __ _ __   __ _| |
@@ -666,10 +656,6 @@ stream) or one of the diplayed autocomplete suggestions."
   (interactive)
   (vlc/enqueue-file (dired-get-filename)))
 
-
-
-
-
 ;  _  __          _     _           _ _
 ; | |/ /___ _   _| |__ (_)_ __   __| (_)_ __   __ _ ___
 ; | ' // _ \ | | | '_ \| | '_ \ / _` | | '_ \ / _` / __|
@@ -679,58 +665,60 @@ stream) or one of the diplayed autocomplete suggestions."
 
 (setq vlc-rc-map (make-sparse-keymap))
 
-(bind-keys :map vlc-rc-map
-           ("." . vlc)
-           ("c" . vlc)
-           ("m" . vlc/send-message)
-           ("?" . vlc/print-help)
-           ("SPC" . vlc/toggle-play)
-           ("RET" . vlc/play)
-           ("DEL" . vlc/stop)
-           ("C-SPC" . vlc/toggle-fullscreen)
+(bind-keys
+ :map vlc-rc-map
+ ("." . vlc)
+ ("c" . vlc)
+ ("m" . vlc/send-message)
+ ("?" . vlc/print-help)
+ ("SPC" . vlc/toggle-play)
+ ("RET" . vlc/play)
+ ("DEL" . vlc/stop)
+ ("C-SPC" . vlc/toggle-fullscreen)
 
-           ;; process control
-           ("b" . vlc/start-process)
-           ("k" . vlc/kill-process)
+ ;; process control
+ ("b" . vlc/start-process)
+ ("d" . vlc/kill-connection)
+ ("k" . vlc/kill-process)
 
-           ;; find-file
-           ("f" . vlc/add-file)
-           ("q" . vlc/enqueue-file)
-           ("c" . vlc/clear)
+ ;; find-file
+ ("f" . vlc/add-file)
+ ("e" . vlc/enqueue-file)
+ ("c" . vlc/clear)
 
-           ;; misc runtime
-           ("p" . vlc/previous)
-           ("n" . vlc/next)
-           ("|" . vlc/screenshot)
-           ("g" . vlc/show-vlc-buffer)
-           ("v" . vlc/volume-ctrl)
-           ("'" . vlc/set-stream-position)
+ ;; misc runtime
+ ("p" . vlc/previous)
+ ("n" . vlc/next)
+ ("|" . vlc/screenshot)
+ ("g" . vlc/show-vlc-buffer)
+ ("v" . vlc/volume-ctrl)
+ ("'" . vlc/set-stream-position)
 
-           ;; speed controls
-           ("C-+" . vlc/fast-forward)
-           ("+"   . vlc/increase-speed)
-           ("="   . vlc/reset-speed)
-           ("-"   . vlc/decrease-speed)
-           ("C--" . vlc/rewind)
-           ("o"   . vlc/frame-by-frame)
-           ("m"   . vlc/goto-playlist-item)
+ ;; speed controls
+ ("S-+" . vlc/fast-forward)
+ ("+"   . vlc/increase-speed)
+ ("="   . vlc/reset-speed)
+ ("-"   . vlc/decrease-speed)
+ ("S--" . vlc/rewind)
+ ("o"   . vlc/frame-by-frame)
+ ("m"   . vlc/goto-playlist-item)
 
-           :prefix "t"
-           :prefix-map vlcrc-toggle-map
-           :menu-name "toggle"
-           ("l" . vlc/toggle-loop)
-           ("r" . vlc/toggle-repeat)
-           ("s" . vlc/toggle-shuffle)
-           ("f" . vlc/toggle-fullscreen)
-           :prefix "s"
-           :prefix-map vlcrc-set-map
-           :menu-name "set"
-           ("d" . vlc/set-audio-device)
-           ("c" . vlc/set-audio-channel)
-           ("a" . vlc/set-audio-track)
-           ("r" . vlc/set-aspect-ratio)
-           ("c" . vlc/set-video-crop)
-           ("z" . vlc/set-video-zoom)
-           ("s" . vlc/set-subtitle-track))
+ :prefix "t"
+ :prefix-map vlc-rc-toggle-map
+ :menu-name "toggle"
+ ("l" . vlc/toggle-loop)
+ ("r" . vlc/toggle-repeat)
+ ("s" . vlc/toggle-shuffle)
+ ("f" . vlc/toggle-fullscreen)
+ :prefix "s"
+ :prefix-map vlc-rc-set-map
+ :menu-name "set"
+ ("d" . vlc/set-audio-device)
+ ("c" . vlc/set-audio-channel)
+ ("a" . vlc/set-audio-track)
+ ("r" . vlc/set-aspect-ratio)
+ ("c" . vlc/set-video-crop)
+ ("z" . vlc/set-video-zoom)
+ ("s" . vlc/set-subtitle-track))
 
 (provide 'vlc-rc)
