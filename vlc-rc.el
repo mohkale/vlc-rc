@@ -238,7 +238,7 @@ connection, one will be made for you regardless."
               (narrow-to-region response-start response-end)
               (setq result (funcall callback))))
         (goto-char response-end)
-        (message "process start/end is %d/%d" response-start response-end)
+        ;; (message "process start/end is %d/%d" response-start response-end)
         result))))
 
 (defun vlc/start-process (&optional prefix)
